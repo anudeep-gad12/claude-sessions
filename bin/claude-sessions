@@ -371,13 +371,15 @@ with open(cache_path, "w") as f:
     json.dump(sessions, f)
 
 for i, s in enumerate(sessions, 1):
-    project = s['project'][:19]
-    branch = s['branch'][:17]
-    summary = s['summary'][:55]
+    project = s['project'][:18]
+    branch = s['branch'][:15]
+    summary = s['summary'][:50]
     date = s['date'][:10]
-    display = f"{i:<4} {date:<11} {project:<20} {branch:<18} {s['messages']:<5} {summary}"
+    msgs = str(s['messages'])
+    display = f"{i:<4} {date:<10} {project:<18} {branch:<15} {msgs:<5} {summary}"
     meta = json.dumps({"id": s["id"], "path": s["path"], "summary": s["summary"], "jsonl_path": s["jsonl_path"]})
-    print(f"{display}\t{meta}")
+    # Use ␞ as separator between display and metadata (invisible in fzf)
+    print(f"{display}␞{meta}")
 PYEOF
 )
 
@@ -398,9 +400,9 @@ PYEOF
             echo "Search: \"$SEARCH_QUERY\" ($TOTAL matches)"
             echo ""
         fi
-        printf "%-4s %-11s %-20s %-18s %-5s %s\n" "#" "When" "Project" "Branch" "Msgs" "Summary"
-        printf '%0.s-' {1..110}; echo
-        echo "$SESSION_DATA" | cut -f1
+        printf "%-4s %-10s %-18s %-15s %-5s %s\n" "#" "When" "Project" "Branch" "Msgs" "Summary"
+        printf '%0.s-' {1..100}; echo
+        echo "$SESSION_DATA" | cut -d$'␞' -f1
         echo ""
         echo "--- Showing $TOTAL sessions ---"
         echo "To resume: claude-sessions pick <number>"
@@ -414,10 +416,10 @@ PYEOF
             HEADER_PREFIX=""
         fi
 
-        HEADER="${HEADER_PREFIX}$(printf '%-4s %-11s %-20s %-18s %-5s %s' '#' 'When' 'Project' 'Branch' 'Msgs' 'Summary')
-$(printf '%0.s─' {1..100})"
+        HEADER="${HEADER_PREFIX}$(printf '%-4s %-10s %-18s %-15s %-5s %s' '#' 'When' 'Project' 'Branch' 'Msgs' 'Summary')
+$(printf '%0.s─' {1..95})"
 
-        SELECTED=$(echo "$SESSION_DATA" | cut -f1 | fzf \
+        SELECTED=$(echo "$SESSION_DATA" | cut -d$'␞' -f1 | fzf \
             --header="$HEADER" \
             --prompt="  session > " \
             --height=100% \
@@ -425,6 +427,7 @@ $(printf '%0.s─' {1..100})"
             --no-mouse \
             --ansi \
             --cycle \
+            --no-hscroll \
             --preview="$PREVIEW_CMD" \
             --preview-window=right:55%:wrap \
             --bind='enter:accept' \
@@ -445,7 +448,7 @@ $(printf '%0.s─' {1..100})"
             exit 0
         fi
 
-        META=$(echo "$SESSION_DATA" | sed -n "${PICK_NUM}p" | cut -f2)
+        META=$(echo "$SESSION_DATA" | sed -n "${PICK_NUM}p" | cut -d$'␞' -f2)
 
         SESSION_ID=$(echo "$META" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
         SESSION_PATH=$(echo "$META" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")
