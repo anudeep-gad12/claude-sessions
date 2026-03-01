@@ -1,0 +1,461 @@
+#!/bin/bash
+# claude-sessions — Browse & resume Claude Code sessions with fzf
+# https://github.com/anudeep-gad12/claude-sessions
+#
+# Usage:
+#   claude-sessions              - Interactive picker with conversation preview
+#   claude-sessions -s "query"   - Search session content, then pick
+#   claude-sessions --list       - Plain list (no fzf)
+#   claude-sessions -n 30        - Limit to 30 sessions
+#   claude-sessions myproject    - Filter by project name
+#   claude-sessions pick 3       - Resume session #3 from last list
+#   claude-sessions --clear      - Clear cache and rescan
+
+set -euo pipefail
+
+LIMIT=0
+FILTER=""
+ACTION=""
+LIST_MODE=false
+SEARCH_QUERY=""
+
+# Resolve the directory where this script lives (follows symlinks)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+CLAUDE_DIR="$HOME/.claude/projects"
+CACHE_DIR="$HOME/.claude"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        pick)        ACTION="pick"; shift; PICK_NUM="${1:-}"; shift ;;
+        --list|-l)   LIST_MODE=true; shift ;;
+        --clear)     rm -f "$CACHE_DIR/.session-scan-cache.json"; echo "Cache cleared."; shift ;;
+        -n)          shift; LIMIT="${1:-0}"; shift ;;
+        -s|--search) shift; SEARCH_QUERY="${1:-}"; shift ;;
+        -h|--help)   ACTION="help"; shift ;;
+        -v|--version) ACTION="version"; shift ;;
+        *)           FILTER="$1"; shift ;;
+    esac
+done
+
+if [ "$ACTION" = "help" ]; then
+    cat << 'HELP'
+claude-sessions — Browse & resume Claude Code sessions
+
+USAGE:
+  claude-sessions                    Interactive picker with conversation preview
+  claude-sessions -s "auth bug"      Search sessions by content
+  claude-sessions myproject          Filter by project name
+  claude-sessions --list             Plain text list (no fzf)
+  claude-sessions -n 50              Show up to 50 sessions
+  claude-sessions pick 3             Resume session #3 from last list
+  claude-sessions --clear            Clear scan cache
+
+KEYBINDINGS (in fzf picker):
+  Enter                              Resume selected session
+  Ctrl+P                             Toggle conversation preview
+  Up/Down                            Navigate sessions
+  Type to filter                     Fuzzy search the list
+  Esc                                Quit
+
+REQUIREMENTS:
+  python3                            Included on macOS/most Linux
+  fzf                                brew install fzf / apt install fzf
+  claude                             Claude Code CLI
+
+https://github.com/anudeep-gad12/claude-sessions
+HELP
+    exit 0
+fi
+
+if [ "$ACTION" = "version" ]; then
+    echo "claude-sessions 1.0.0"
+    exit 0
+fi
+
+if ! [ -d "$CLAUDE_DIR" ]; then
+    echo "No Claude Code sessions found at $CLAUDE_DIR"
+    echo "Make sure you've used Claude Code at least once."
+    exit 1
+fi
+
+if [ "$ACTION" = "pick" ] && [ -n "${PICK_NUM:-}" ]; then
+    CACHE="$CACHE_DIR/.session-cache.json"
+    if [ ! -f "$CACHE" ]; then
+        echo "Run 'claude-sessions' first to list sessions."
+        exit 1
+    fi
+
+    RESULT=$(python3 -c "
+import json
+with open('$CACHE') as f:
+    sessions = json.load(f)
+idx = $PICK_NUM - 1
+if idx < 0 or idx >= len(sessions):
+    print('INVALID')
+else:
+    s = sessions[idx]
+    print(s['id'] + '|' + s['path'] + '|' + s['summary'])
+")
+
+    if [ "$RESULT" = "INVALID" ]; then
+        echo "Invalid number. Run 'claude-sessions' to see the list."
+        exit 1
+    fi
+
+    SESSION_ID=$(echo "$RESULT" | cut -d'|' -f1)
+    SESSION_PATH=$(echo "$RESULT" | cut -d'|' -f2)
+    SESSION_SUMMARY=$(echo "$RESULT" | cut -d'|' -f3)
+
+    echo "Resuming: $SESSION_SUMMARY"
+    echo "Project:  $SESSION_PATH"
+    echo ""
+
+    cd "$SESSION_PATH" && claude --resume "$SESSION_ID"
+else
+    SESSION_DATA=$(python3 - "$FILTER" "$LIMIT" "$SEARCH_QUERY" << 'PYEOF'
+import json, os, sys, re, glob
+from datetime import datetime, timezone
+
+filter_term = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
+show_limit = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 0
+search_query = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
+
+claude_dir = os.path.expanduser("~/.claude/projects")
+scan_cache_path = os.path.expanduser("~/.claude/.session-scan-cache.json")
+
+# Load scan cache (mtime-based)
+scan_cache = {}
+if os.path.exists(scan_cache_path):
+    try:
+        with open(scan_cache_path) as f:
+            scan_cache = json.load(f)
+    except:
+        scan_cache = {}
+
+# Load index summaries as lookup
+index_summaries = {}
+for project_dir in os.listdir(claude_dir):
+    index_path = os.path.join(claude_dir, project_dir, "sessions-index.json")
+    if os.path.exists(index_path):
+        try:
+            with open(index_path) as f:
+                data = json.load(f)
+            for entry in data.get("entries", []):
+                sid = entry.get("sessionId", "")
+                summary = entry.get("summary", "")
+                if sid and summary and summary != "No summary":
+                    index_summaries[sid] = summary
+        except:
+            pass
+
+def relative_time(iso_str):
+    """Convert ISO timestamp to relative time string."""
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        diff = now - dt
+        seconds = int(diff.total_seconds())
+        if seconds < 60:
+            return "now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        if days < 7:
+            return f"{days}d ago"
+        weeks = days // 7
+        if weeks < 5:
+            return f"{weeks}w ago"
+        months = days // 30
+        if months < 12:
+            return f"{months}mo ago"
+        years = days // 365
+        return f"{years}y ago"
+    except:
+        return "unknown"
+
+def scan_jsonl_fast(jsonl_path):
+    """Read first ~15 lines for metadata, last ~50KB for last human message."""
+    info = {
+        "session_id": os.path.basename(jsonl_path).replace(".jsonl", ""),
+        "cwd": "",
+        "git_branch": "",
+        "first_timestamp": "",
+        "last_human_msg": "",
+        "msg_count": 0,
+    }
+
+    try:
+        file_size = os.path.getsize(jsonl_path)
+    except:
+        return info
+
+    try:
+        with open(jsonl_path) as f:
+            for i, line in enumerate(f):
+                if i >= 15:
+                    break
+                try:
+                    obj = json.loads(line.strip())
+                except:
+                    continue
+                if obj.get("type") in ("file-history-snapshot", "summary"):
+                    continue
+                msg = obj.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+                if not info["cwd"] and obj.get("cwd"):
+                    info["cwd"] = obj["cwd"]
+                if not info["git_branch"] and obj.get("gitBranch"):
+                    info["git_branch"] = obj["gitBranch"]
+                if not info["first_timestamp"] and obj.get("timestamp"):
+                    info["first_timestamp"] = obj["timestamp"]
+                if info["cwd"] and info["git_branch"] and info["first_timestamp"]:
+                    break
+    except:
+        pass
+
+    chunk_size = min(file_size, 50_000)
+    last_human = ""
+    msg_count = 0
+    try:
+        with open(jsonl_path) as f:
+            if file_size > chunk_size:
+                f.seek(file_size - chunk_size)
+                f.readline()
+            for line in f:
+                try:
+                    obj = json.loads(line.strip())
+                except:
+                    continue
+                msg = obj.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+                role = msg.get("role", "")
+                if role in ("user", "assistant"):
+                    msg_count += 1
+                if role == "user":
+                    content = msg.get("content", "")
+                    text = ""
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict) and c.get("type") == "text":
+                                t = c["text"].strip()
+                                if t and not t.startswith("<"):
+                                    text = t
+                    elif isinstance(content, str):
+                        t = content.strip()
+                        if t and not t.startswith("<"):
+                            text = t
+                    if text:
+                        last_human = text
+    except:
+        pass
+
+    info["last_human_msg"] = re.sub(r'<[^>]+>', '', last_human).strip()
+    info["last_human_msg"] = ' '.join(info["last_human_msg"].split())
+    info["msg_count"] = msg_count
+    return info
+
+def search_jsonl(jsonl_path, query):
+    """Quick check if query appears in the JSONL file."""
+    query_lower = query.lower()
+    try:
+        with open(jsonl_path, 'r') as f:
+            while True:
+                chunk = f.read(256_000)
+                if not chunk:
+                    break
+                if query_lower in chunk.lower():
+                    return True
+        return False
+    except:
+        return False
+
+sessions = []
+new_cache = {}
+
+for project_dir in os.listdir(claude_dir):
+    full_project_dir = os.path.join(claude_dir, project_dir)
+    if not os.path.isdir(full_project_dir):
+        continue
+
+    jsonl_files = glob.glob(os.path.join(full_project_dir, "*.jsonl"))
+
+    for jf in jsonl_files:
+        if os.path.basename(jf).startswith("agent-"):
+            continue
+
+        try:
+            mtime = os.path.getmtime(jf)
+        except:
+            continue
+
+        cached = scan_cache.get(jf)
+        if cached and cached.get("mtime") == mtime:
+            info = cached["data"]
+        else:
+            info = scan_jsonl_fast(jf)
+            new_cache[jf] = {"mtime": mtime, "data": info}
+
+        if not new_cache.get(jf):
+            new_cache[jf] = {"mtime": mtime, "data": info}
+
+        if info["msg_count"] == 0:
+            continue
+
+        if search_query and not search_jsonl(jf, search_query):
+            continue
+
+        if info["cwd"]:
+            project_name = os.path.basename(info["cwd"])
+        else:
+            project_name = project_dir.strip("-").split("-")[-1]
+
+        if filter_term and filter_term.lower() not in project_name.lower():
+            continue
+
+        sid = info["session_id"]
+        summary = index_summaries.get(sid, "")
+        if not summary:
+            summary = info["last_human_msg"] if info["last_human_msg"] else "No summary"
+
+        created = info["first_timestamp"]
+        date_str = relative_time(created) if created else "unknown"
+
+        if not created:
+            try:
+                date_str = relative_time(datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat())
+                created = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+            except:
+                date_str = "unknown"
+                created = ""
+
+        sessions.append({
+            "date": date_str,
+            "created": created,
+            "project": project_name,
+            "branch": info["git_branch"],
+            "summary": summary,
+            "messages": info["msg_count"],
+            "id": sid,
+            "path": info["cwd"],
+            "jsonl_path": jf,
+        })
+
+try:
+    with open(scan_cache_path, "w") as f:
+        json.dump(new_cache, f)
+except:
+    pass
+
+sessions.sort(key=lambda x: x["created"], reverse=True)
+if show_limit > 0:
+    sessions = sessions[:show_limit]
+
+if not sessions:
+    sys.exit(0)
+
+cache_path = os.path.expanduser("~/.claude/.session-cache.json")
+with open(cache_path, "w") as f:
+    json.dump(sessions, f)
+
+for i, s in enumerate(sessions, 1):
+    project = s['project'][:19]
+    branch = s['branch'][:17]
+    summary = s['summary'][:55]
+    date = s['date'][:10]
+    display = f"{i:<4} {date:<11} {project:<20} {branch:<18} {s['messages']:<5} {summary}"
+    meta = json.dumps({"id": s["id"], "path": s["path"], "summary": s["summary"], "jsonl_path": s["jsonl_path"]})
+    print(f"{display}\t{meta}")
+PYEOF
+)
+
+    if [ -z "$SESSION_DATA" ]; then
+        if [ -n "$SEARCH_QUERY" ]; then
+            echo "No sessions found matching: $SEARCH_QUERY"
+        else
+            echo "No sessions found."
+        fi
+        exit 0
+    fi
+
+    TOTAL=$(echo "$SESSION_DATA" | wc -l | tr -d ' ')
+
+    if [ "$LIST_MODE" = true ] || ! command -v fzf &>/dev/null; then
+        echo ""
+        if [ -n "$SEARCH_QUERY" ]; then
+            echo "Search: \"$SEARCH_QUERY\" ($TOTAL matches)"
+            echo ""
+        fi
+        printf "%-4s %-11s %-20s %-18s %-5s %s\n" "#" "When" "Project" "Branch" "Msgs" "Summary"
+        printf '%0.s-' {1..110}; echo
+        echo "$SESSION_DATA" | cut -f1
+        echo ""
+        echo "--- Showing $TOTAL sessions ---"
+        echo "To resume: claude-sessions pick <number>"
+    else
+        PREVIEW_CMD="python3 $SCRIPT_DIR/claude-sessions-preview {1}"
+        if [ -n "$SEARCH_QUERY" ]; then
+            PREVIEW_CMD="python3 $SCRIPT_DIR/claude-sessions-preview {1} '$SEARCH_QUERY'"
+            HEADER_PREFIX="Search: \"$SEARCH_QUERY\" ($TOTAL matches)
+"
+        else
+            HEADER_PREFIX=""
+        fi
+
+        HEADER="${HEADER_PREFIX}$(printf '%-4s %-11s %-20s %-18s %-5s %s' '#' 'When' 'Project' 'Branch' 'Msgs' 'Summary')
+$(printf '%0.s─' {1..100})"
+
+        SELECTED=$(echo "$SESSION_DATA" | cut -f1 | fzf \
+            --header="$HEADER" \
+            --prompt="  session > " \
+            --height=100% \
+            --reverse \
+            --no-mouse \
+            --ansi \
+            --cycle \
+            --preview="$PREVIEW_CMD" \
+            --preview-window=right:55%:wrap \
+            --bind='enter:accept' \
+            --bind='ctrl-p:toggle-preview' \
+            --expect=enter \
+            --info=hidden)
+
+        if [ -z "$SELECTED" ]; then
+            echo "No session selected."
+            exit 0
+        fi
+
+        CHOSEN=$(echo "$SELECTED" | tail -1)
+        PICK_NUM=$(echo "$CHOSEN" | awk '{print $1}')
+
+        if [ -z "$PICK_NUM" ] || ! [[ "$PICK_NUM" =~ ^[0-9]+$ ]]; then
+            echo "No session selected."
+            exit 0
+        fi
+
+        META=$(echo "$SESSION_DATA" | sed -n "${PICK_NUM}p" | cut -f2)
+
+        SESSION_ID=$(echo "$META" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+        SESSION_PATH=$(echo "$META" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")
+        SESSION_SUMMARY=$(echo "$META" | python3 -c "import json,sys; print(json.load(sys.stdin)['summary'])")
+
+        echo ""
+        echo "Resuming: $SESSION_SUMMARY"
+        echo "Project:  $SESSION_PATH"
+        echo ""
+
+        cd "$SESSION_PATH" && claude --resume "$SESSION_ID"
+    fi
+fi

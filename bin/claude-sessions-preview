@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Preview helper for claude-sessions. Called by fzf --preview.
+Usage: claude-sessions-preview <session_number> [search_query]
+"""
+import json, os, sys, re
+
+CYAN = "\033[36m"
+YELLOW = "\033[33m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+MAGENTA = "\033[35m"
+
+def render_session(session_num, search_query=None):
+    cache_path = os.path.expanduser("~/.claude/.session-cache.json")
+    if not os.path.exists(cache_path):
+        print("No session cache found.")
+        return
+
+    with open(cache_path) as f:
+        sessions = json.load(f)
+
+    idx = int(session_num) - 1
+    if idx < 0 or idx >= len(sessions):
+        print("Invalid session number.")
+        return
+
+    s = sessions[idx]
+    jsonl_path = s.get("jsonl_path", "")
+    if not jsonl_path or not os.path.exists(jsonl_path):
+        print(f"Session file not found: {jsonl_path}")
+        return
+
+    # Header
+    print(f"{BOLD}{CYAN}{'─' * 60}{RESET}")
+    print(f"{BOLD} {s.get('project', '?')}{RESET}  {DIM}{s.get('branch', '')}{RESET}")
+    print(f"{DIM} {s.get('path', '')}{RESET}")
+    print(f"{BOLD}{CYAN}{'─' * 60}{RESET}")
+    print()
+
+    # Parse and render messages
+    messages = []
+    try:
+        with open(jsonl_path) as f:
+            for line in f:
+                try:
+                    obj = json.loads(line.strip())
+                except:
+                    continue
+
+                obj_type = obj.get("type", "")
+                if obj_type in ("file-history-snapshot", "summary", "system"):
+                    continue
+
+                msg = obj.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+
+                role = msg.get("role", "")
+                if role not in ("user", "assistant"):
+                    continue
+
+                content = msg.get("content", "")
+                texts = []
+                tools = []
+
+                if isinstance(content, str):
+                    texts.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type", "")
+                        if btype == "text":
+                            t = block.get("text", "").strip()
+                            if t and not t.startswith("<system"):
+                                texts.append(t)
+                        elif btype == "tool_use":
+                            name = block.get("name", "?")
+                            inp = block.get("input", {})
+                            detail = ""
+                            if name == "Bash":
+                                detail = inp.get("command", "")[:80]
+                            elif name == "Read":
+                                detail = inp.get("file_path", "")
+                            elif name == "Edit":
+                                detail = inp.get("file_path", "")
+                            elif name == "Write":
+                                detail = inp.get("file_path", "")
+                            elif name == "Grep":
+                                detail = f'"{inp.get("pattern", "")}" in {inp.get("path", ".")}'
+                            elif name == "Glob":
+                                detail = inp.get("pattern", "")
+                            elif name == "Agent":
+                                detail = inp.get("description", "")[:60]
+                            elif name == "WebSearch":
+                                detail = inp.get("query", "")[:60]
+                            else:
+                                detail = str(inp)[:60]
+                            tools.append(f"{name}: {detail}")
+
+                text = "\n".join(texts).strip()
+                text = re.sub(r'<[^>]+>', '', text).strip()
+
+                if not text and not tools:
+                    continue
+
+                messages.append({
+                    "role": role,
+                    "text": text,
+                    "tools": tools,
+                })
+    except Exception as e:
+        print(f"Error reading session: {e}")
+        return
+
+    if not messages:
+        print(f"{DIM}  (empty session){RESET}")
+        return
+
+    max_lines = 200
+    line_count = 0
+
+    for i, m in enumerate(messages):
+        if line_count > max_lines:
+            remaining = len(messages) - i
+            print(f"\n{DIM}  ... {remaining} more messages ...{RESET}")
+            break
+
+        role = m["role"]
+        text = m["text"]
+        tools = m["tools"]
+
+        if role == "user":
+            label = f"{GREEN}{BOLD}  YOU{RESET}"
+        else:
+            label = f"{CYAN}{BOLD}  CLAUDE{RESET}"
+
+        print(label)
+
+        if text:
+            lines = text.split("\n")
+            if len(lines) > 15:
+                for l in lines[:10]:
+                    line_out = l[:120]
+                    if search_query and search_query.lower() in line_out.lower():
+                        line_out = highlight_match(line_out, search_query)
+                    print(f"  {line_out}")
+                    line_count += 1
+                print(f"  {DIM}... ({len(lines) - 10} more lines) ...{RESET}")
+                line_count += 1
+            else:
+                for l in lines:
+                    line_out = l[:120]
+                    if search_query and search_query.lower() in line_out.lower():
+                        line_out = highlight_match(line_out, search_query)
+                    print(f"  {line_out}")
+                    line_count += 1
+
+        for t in tools[:5]:
+            print(f"  {DIM}[{t}]{RESET}")
+            line_count += 1
+        if len(tools) > 5:
+            print(f"  {DIM}[... +{len(tools)-5} more tools]{RESET}")
+            line_count += 1
+
+        print()
+        line_count += 2
+
+def highlight_match(text, query):
+    """Highlight search matches in text."""
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    return pattern.sub(lambda m: f"{RED}{BOLD}{m.group()}{RESET}", text)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: claude-sessions-preview <session_number> [search_query]")
+        sys.exit(1)
+    num = sys.argv[1]
+    query = sys.argv[2] if len(sys.argv) > 2 else None
+    render_session(num, query)
