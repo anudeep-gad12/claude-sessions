@@ -4,6 +4,8 @@ Browse, search, and resume your Claude Code conversations — from the terminal.
 
 A lightweight CLI that scans your actual session files (not just the index), so **every session shows up**. Uses `fzf` for interactive picking with a live conversation preview.
 
+![claude-sessions](demo/screenshot.png)
+
 ## Features
 
 - **Finds all sessions** — scans raw JSONL files, not the incomplete `sessions-index.json`
