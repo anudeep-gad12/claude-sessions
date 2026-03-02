@@ -191,6 +191,7 @@ def scan_jsonl_fast(jsonl_path):
         "cwd": "",
         "git_branch": "",
         "first_timestamp": "",
+        "last_timestamp": "",
         "last_human_msg": "",
         "msg_count": 0,
     }
@@ -201,7 +202,7 @@ def scan_jsonl_fast(jsonl_path):
         return info
 
     try:
-        with open(jsonl_path) as f:
+        with open(jsonl_path, errors="replace") as f:
             for i, line in enumerate(f):
                 if i >= 15:
                     break
@@ -225,40 +226,86 @@ def scan_jsonl_fast(jsonl_path):
     except:
         pass
 
+    # Read first chunk for early messages + last chunk for recent messages
     chunk_size = min(file_size, 50_000)
     last_human = ""
     msg_count = 0
+
+    def scan_chunk(f):
+        nonlocal last_human, msg_count
+        for line in f:
+            try:
+                obj = json.loads(line.strip())
+            except:
+                continue
+            ts = obj.get("timestamp", "")
+            if ts:
+                info["last_timestamp"] = ts
+            msg = obj.get("message", {})
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role", "")
+            if role in ("user", "assistant"):
+                msg_count += 1
+            if role == "user":
+                content = msg.get("content", "")
+                text = ""
+                if isinstance(content, list):
+                    for c in content:
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            t = c["text"].strip()
+                            if t and not t.startswith("<"):
+                                text = t
+                elif isinstance(content, str):
+                    t = content.strip()
+                    if t and not t.startswith("<"):
+                        text = t
+                if text:
+                    last_human = text
+
     try:
-        with open(jsonl_path) as f:
+        # Scan last 50KB (most recent messages)
+        with open(jsonl_path, errors="replace") as f:
             if file_size > chunk_size:
                 f.seek(file_size - chunk_size)
                 f.readline()
-            for line in f:
-                try:
-                    obj = json.loads(line.strip())
-                except:
-                    continue
-                msg = obj.get("message", {})
-                if not isinstance(msg, dict):
-                    continue
-                role = msg.get("role", "")
-                if role in ("user", "assistant"):
-                    msg_count += 1
-                if role == "user":
-                    content = msg.get("content", "")
-                    text = ""
-                    if isinstance(content, list):
-                        for c in content:
-                            if isinstance(c, dict) and c.get("type") == "text":
-                                t = c["text"].strip()
-                                if t and not t.startswith("<"):
-                                    text = t
-                    elif isinstance(content, str):
-                        t = content.strip()
-                        if t and not t.startswith("<"):
-                            text = t
-                    if text:
-                        last_human = text
+            scan_chunk(f)
+
+        # If tail found nothing, scan first 50KB (catches sessions where
+        # messages are at the start and file-history-snapshots fill the end)
+        if msg_count == 0 and file_size > chunk_size:
+            with open(jsonl_path, errors="replace") as f:
+                lines_read = 0
+                bytes_read = 0
+                for line in f:
+                    bytes_read += len(line.encode())
+                    if bytes_read > chunk_size:
+                        break
+                    try:
+                        obj = json.loads(line.strip())
+                    except:
+                        continue
+                    msg = obj.get("message", {})
+                    if not isinstance(msg, dict):
+                        continue
+                    role = msg.get("role", "")
+                    if role in ("user", "assistant"):
+                        msg_count += 1
+                    if role == "user":
+                        content = msg.get("content", "")
+                        text = ""
+                        if isinstance(content, list):
+                            for c in content:
+                                if isinstance(c, dict) and c.get("type") == "text":
+                                    t = c["text"].strip()
+                                    if t and not t.startswith("<"):
+                                        text = t
+                        elif isinstance(content, str):
+                            t = content.strip()
+                            if t and not t.startswith("<"):
+                                text = t
+                        if text:
+                            last_human = text
     except:
         pass
 
@@ -271,7 +318,7 @@ def search_jsonl(jsonl_path, query):
     """Quick check if query appears in the JSONL file."""
     query_lower = query.lower()
     try:
-        with open(jsonl_path, 'r') as f:
+        with open(jsonl_path, 'r', errors="replace") as f:
             while True:
                 chunk = f.read(256_000)
                 if not chunk:
@@ -330,20 +377,21 @@ for project_dir in os.listdir(claude_dir):
         if not summary:
             summary = info["last_human_msg"] if info["last_human_msg"] else "No summary"
 
-        created = info["first_timestamp"]
-        date_str = relative_time(created) if created else "unknown"
+        # Use last activity for display/sorting, fall back to creation time
+        last_active = info["last_timestamp"] or info["first_timestamp"]
+        date_str = relative_time(last_active) if last_active else "unknown"
 
-        if not created:
+        if not last_active:
             try:
-                date_str = relative_time(datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat())
-                created = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+                last_active = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+                date_str = relative_time(last_active)
             except:
                 date_str = "unknown"
-                created = ""
+                last_active = ""
 
         sessions.append({
             "date": date_str,
-            "created": created,
+            "last_active": last_active,
             "project": project_name,
             "branch": info["git_branch"],
             "summary": summary,
@@ -359,7 +407,7 @@ try:
 except:
     pass
 
-sessions.sort(key=lambda x: x["created"], reverse=True)
+sessions.sort(key=lambda x: x["last_active"], reverse=True)
 if show_limit > 0:
     sessions = sessions[:show_limit]
 

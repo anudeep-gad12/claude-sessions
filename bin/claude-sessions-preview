@@ -43,7 +43,7 @@ def render_session(session_num, search_query=None):
     # Parse and render messages
     messages = []
     try:
-        with open(jsonl_path) as f:
+        with open(jsonl_path, errors="replace") as f:
             for line in f:
                 try:
                     obj = json.loads(line.strip())
