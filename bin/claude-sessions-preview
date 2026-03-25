@@ -120,15 +120,7 @@ def render_session(session_num, search_query=None):
         print(f"{DIM}  (empty session){RESET}")
         return
 
-    max_lines = 200
-    line_count = 0
-
     for i, m in enumerate(messages):
-        if line_count > max_lines:
-            remaining = len(messages) - i
-            print(f"\n{DIM}  ... {remaining} more messages ...{RESET}")
-            break
-
         role = m["role"]
         text = m["text"]
         tools = m["tools"]
@@ -141,33 +133,18 @@ def render_session(session_num, search_query=None):
         print(label)
 
         if text:
-            lines = text.split("\n")
-            if len(lines) > 15:
-                for l in lines[:10]:
-                    line_out = l[:120]
-                    if search_query and search_query.lower() in line_out.lower():
-                        line_out = highlight_match(line_out, search_query)
-                    print(f"  {line_out}")
-                    line_count += 1
-                print(f"  {DIM}... ({len(lines) - 10} more lines) ...{RESET}")
-                line_count += 1
-            else:
-                for l in lines:
-                    line_out = l[:120]
-                    if search_query and search_query.lower() in line_out.lower():
-                        line_out = highlight_match(line_out, search_query)
-                    print(f"  {line_out}")
-                    line_count += 1
+            for l in text.split("\n"):
+                line_out = l[:120]
+                if search_query and search_query.lower() in line_out.lower():
+                    line_out = highlight_match(line_out, search_query)
+                print(f"  {line_out}")
 
         for t in tools[:5]:
             print(f"  {DIM}[{t}]{RESET}")
-            line_count += 1
         if len(tools) > 5:
             print(f"  {DIM}[... +{len(tools)-5} more tools]{RESET}")
-            line_count += 1
 
         print()
-        line_count += 2
 
 def highlight_match(text, query):
     """Highlight search matches in text."""

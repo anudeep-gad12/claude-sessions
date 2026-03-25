@@ -60,6 +60,8 @@ USAGE:
 KEYBINDINGS (in fzf picker):
   Enter                              Resume selected session
   Ctrl+P                             Toggle conversation preview
+  Shift+Up/Down                      Scroll preview line by line
+  Ctrl+F / Ctrl+B                    Scroll preview page down/up
   Up/Down                            Navigate sessions
   Type to filter                     Fuzzy search the list
   Esc                                Quit
@@ -477,9 +479,11 @@ $(printf '%0.s─' {1..95})"
             --cycle \
             --no-hscroll \
             --preview="$PREVIEW_CMD" \
-            --preview-window=right:55%:wrap \
+            --preview-window=right:55%:wrap:follow \
             --bind='enter:accept' \
             --bind='ctrl-p:toggle-preview' \
+            --bind='shift-up:preview-up,shift-down:preview-down' \
+            --bind='ctrl-f:preview-page-down,ctrl-b:preview-page-up' \
             --expect=enter \
             --info=hidden)
 
