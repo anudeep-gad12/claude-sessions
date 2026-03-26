@@ -141,6 +141,22 @@ if os.path.exists(scan_cache_path):
     except:
         scan_cache = {}
 
+# Load user-renamed sessions from ~/.claude/sessions/*.json
+session_names = {}
+sessions_dir = os.path.expanduser("~/.claude/sessions")
+if os.path.isdir(sessions_dir):
+    for sf in os.listdir(sessions_dir):
+        if sf.endswith(".json"):
+            try:
+                with open(os.path.join(sessions_dir, sf)) as f:
+                    sdata = json.load(f)
+                sid = sdata.get("sessionId", "")
+                name = sdata.get("name", "")
+                if sid and name:
+                    session_names[sid] = name
+            except:
+                pass
+
 # Load index summaries as lookup
 index_summaries = {}
 for project_dir in os.listdir(claude_dir):
@@ -151,8 +167,11 @@ for project_dir in os.listdir(claude_dir):
                 data = json.load(f)
             for entry in data.get("entries", []):
                 sid = entry.get("sessionId", "")
+                custom_title = entry.get("customTitle", "")
                 summary = entry.get("summary", "")
-                if sid and summary and summary != "No summary":
+                if sid and custom_title:
+                    index_summaries[sid] = custom_title
+                elif sid and summary and summary != "No summary":
                     index_summaries[sid] = summary
         except:
             pass
@@ -375,7 +394,7 @@ for project_dir in os.listdir(claude_dir):
             continue
 
         sid = info["session_id"]
-        summary = index_summaries.get(sid, "")
+        summary = session_names.get(sid, "") or index_summaries.get(sid, "")
         if not summary:
             summary = info["last_human_msg"] if info["last_human_msg"] else "No summary"
 
